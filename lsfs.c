@@ -33,7 +33,7 @@ static void ls_dir(void *img, dinode *inodes, uint inum, const char *path) {
     if (din->type != T_DIR)
         return;
 
-    printf("\n- %s/\n", path[0] ? path : "");
+    printf("\n- %s/ [nlink=%d]\n", path[0] ? path : "", din->nlink);
 
     // Direct blocks
     for (int i = 0; i < NDIRECT; i++) {

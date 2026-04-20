@@ -18,7 +18,16 @@
 #undef stat
 #undef dirent
 
-#define BLOCK_SIZE (512)
+#define BLOCK_SIZE (512L)
+
+typedef struct HardLinkMapNode {
+    uint fsINode;
+    uint hostINode;
+    uint remainLink;
+    struct HardLinkMapNode *next;
+} HardLinkMapNode;
+
+HardLinkMapNode *hardLinkMapRoot = NULL;
 
 int nblocks = 995;
 int ninodes = 200;
@@ -41,6 +50,45 @@ void rsect(uint sec, void *buf);
 uint ialloc(ushort type);
 void iappend(uint inum, void *p, int n);
 
+uint fetchHardLink(uint hostINode, uint nlinks) {
+    uint ret = 0;
+    HardLinkMapNode *curr, *last;
+    for (curr = hardLinkMapRoot, last = NULL; curr;
+         last = curr, curr = curr->next) {
+        if (curr->hostINode == hostINode) {
+            ret = curr->fsINode;
+            if (--curr->remainLink == 0) {
+                if (last)
+                    last->next = curr->next;
+                else
+                    hardLinkMapRoot = NULL;
+                free(curr);
+            }
+            return ret;
+        }
+    }
+
+    curr = malloc(sizeof(HardLinkMapNode));
+    if (last)
+        last->next = curr;
+    else
+        hardLinkMapRoot = curr;
+    if (curr == NULL) {
+        perror("malloc");
+    }
+    curr->hostINode = hostINode;
+    curr->fsINode = ialloc(T_FILE);
+    curr->remainLink = nlinks - 1;
+    return curr->fsINode;
+}
+
+void freeHardLinkMap() {
+    for (HardLinkMapNode *curr = hardLinkMapRoot; curr; curr = curr->next) {
+        free(curr);
+    }
+    hardLinkMapRoot = NULL;
+}
+
 // convert to intel byte order
 ushort xshort(ushort x) {
     ushort y;
@@ -61,7 +109,6 @@ uint xint(uint x) {
 }
 
 int mkfs(int nblocks, int ninodes, int size) {
-
     int i;
     char buf[BLOCK_SIZE];
 
@@ -108,6 +155,13 @@ int add_dir(DIR *cur_dir, int cur_inode, int parent_inode) {
     bzero(&de, sizeof(de));
     de.inum = xshort(parent_inode);
     strcpy(de.name, "..");
+
+    if (cur_inode != parent_inode) {
+        rinode(parent_inode, &din);
+        ++din.nlink;
+        winode(parent_inode, &din);
+    }
+
     iappend(cur_inode, &de, sizeof(de));
 
     if (cur_dir == NULL) {
@@ -160,7 +214,24 @@ int add_dir(DIR *cur_dir, int cur_inode, int parent_inode) {
             }
         } else {
             bytes_read = 0;
-            child_inode = ialloc(T_FILE);
+            if (st.st_nlink > 0) {
+                printf("^ is hardlink\n");
+                uint newINum = freeinode;
+                child_inode = fetchHardLink(st.st_ino, st.st_nlink);
+                if (child_inode != newINum) {
+                    // no need to read
+                    rinode(child_inode, &din);
+                    ++din.nlink;
+                    winode(child_inode, &din);
+
+                    de.inum = xshort(child_inode);
+                    strncpy(de.name, entry->d_name, DIRSIZ);
+                    iappend(cur_inode, &de, sizeof(de));
+                    continue;
+                }
+            } else {
+                child_inode = ialloc(T_FILE);
+            }
             bzero(&de, sizeof(de));
             while ((bytes_read = read(child_fd, buf, sizeof(buf))) > 0) {
                 iappend(child_inode, buf, bytes_read);
@@ -187,7 +258,7 @@ int main(int argc, char *argv[]) {
     DIR *root_dir;
 
     if (argc < 2) {
-        fprintf(stderr, "Usage: mkfs fs.img files...\n");
+        fprintf(stderr, "Usage: mkfs fs.img [file_tree_root]\n");
         exit(1);
     }
 
@@ -202,27 +273,31 @@ int main(int argc, char *argv[]) {
 
     mkfs(995, 200, 1024);
 
-    root_dir = opendir(argv[2]);
-
     root_inode = ialloc(T_DIR);
     assert(root_inode == ROOTINO);
 
-    r = add_dir(root_dir, root_inode, root_inode);
-    if (r != 0) {
-        exit(EXIT_FAILURE);
+    if (argc == 3) {
+        root_dir = opendir(argv[2]);
+        r = add_dir(root_dir, root_inode, root_inode);
+        if (r != 0) {
+            exit(EXIT_FAILURE);
+        }
     }
 
     balloc(usedblocks);
-
+    if (hardLinkMapRoot) {
+        printf("warning: nonempty hard link map");
+        freeHardLinkMap();
+    }
     exit(0);
 }
 
 void wsect(uint sec, void *buf) {
-    if (lseek(fsfd, sec * 512L, 0) != sec * 512L) {
+    if (lseek(fsfd, sec * BLOCK_SIZE, 0) != sec * BLOCK_SIZE) {
         perror("lseek");
         exit(1);
     }
-    if (write(fsfd, buf, 512) != 512) {
+    if (write(fsfd, buf, BLOCK_SIZE) != BLOCK_SIZE) {
         perror("write");
         exit(1);
     }
@@ -254,11 +329,11 @@ void rinode(uint inum, struct dinode *ip) {
 }
 
 void rsect(uint sec, void *buf) {
-    if (lseek(fsfd, sec * 512L, 0) != sec * 512L) {
+    if (lseek(fsfd, sec * BLOCK_SIZE, 0) != sec * BLOCK_SIZE) {
         perror("lseek");
         exit(1);
     }
-    if (read(fsfd, buf, 512) != 512) {
+    if (read(fsfd, buf, BLOCK_SIZE) != BLOCK_SIZE) {
         perror("read");
         exit(1);
     }
@@ -270,7 +345,8 @@ uint ialloc(ushort type) {
 
     bzero(&din, sizeof(din));
     din.type = xshort(type);
-    din.nlink = xshort(1);
+    // 2 + n
+    din.nlink = xshort(type == T_DIR ? 2 : 1);
     din.size = xint(0);
     winode(inum, &din);
     return inum;
