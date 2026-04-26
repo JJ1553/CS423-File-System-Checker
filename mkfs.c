@@ -10,15 +10,13 @@
 #include <unistd.h>
 
 #define stat stat_423     // avoid clash with host struct stat
-#define dirent dirent_423 // avoid clash with host struct stat
+#define dirent dirent_423 // avoid clash with host struct dirent
 #include "types.h"
 
 #include "fs.h"
 #include "stat.h"
 #undef stat
 #undef dirent
-
-#define BLOCK_SIZE (512L)
 
 typedef struct HardLinkMapNode {
     uint fsINode;
@@ -29,23 +27,28 @@ typedef struct HardLinkMapNode {
 
 HardLinkMapNode *hardLinkMapRoot = NULL;
 
-int nblocks = 995;
-int ninodes = 200;
-int size = 1024;
+// Disk layout:
+// [ boot block | sb block | inode blocks | free bit map | data blocks ]
+
+#define FSSIZE 1024 // default size of file system in blocks
+#define NINODES 200 // default maximum number of inodes
+
+#define NINODEBLOCKS(ninodes)                                                  \
+    (ninodes / IPB + 1) // maximum number of inodes block
+#define BITBLOCKS(size)                                                        \
+    (size / (BSIZE * 8) + 1) // maximum number of bitmap as block
 
 int fsfd;
-struct superblock sb;
-char zeroes[512];
+superblock sb;
+char zeroes[BSIZE];
 uint freeblock;
-uint usedblocks;
-uint bitblocks;
-uint freeinode = 1;
+uint freeinode = 1; // start with 1
 uint root_inode;
 
 void balloc(int);
 void wsect(uint, void *);
-void winode(uint, struct dinode *);
-void rinode(uint inum, struct dinode *ip);
+void winode(uint, dinode *);
+void rinode(uint inum, dinode *ip);
 void rsect(uint sec, void *buf);
 uint ialloc(ushort type);
 void iappend(uint inum, void *p, int n);
@@ -108,24 +111,24 @@ uint xint(uint x) {
     return y;
 }
 
-int mkfs(int nblocks, int ninodes, int size) {
+int mkfs(int ninodes, int size) {
     int i;
-    char buf[BLOCK_SIZE];
+    char buf[BSIZE];
+    uint bitblocks;
+    int nblocks;
 
+    bitblocks = BITBLOCKS(size);
+    // 2: boot block + super block
+    freeblock = 2 + NINODEBLOCKS(ninodes) + bitblocks;
+    nblocks = size - freeblock;
     sb.size = xint(size);
     sb.nblocks = xint(nblocks); // so whole disk is size sectors
     sb.ninodes = xint(ninodes);
 
-    bitblocks = size / (512 * 8) + 1;
-    usedblocks = ninodes / IPB + 3 + bitblocks;
-    freeblock = usedblocks;
+    printf("init: used %d (bit block %d + inode block %zu + 2) / %d blocks\n",
+           freeblock, bitblocks, NINODEBLOCKS(ninodes), size);
 
-    printf("used %d (bit %d ninode %zu) free %u total %d\n", usedblocks,
-           bitblocks, ninodes / IPB + 1, freeblock, nblocks + usedblocks);
-
-    assert(nblocks + usedblocks == size);
-
-    for (i = 0; i < nblocks + usedblocks; i++)
+    for (i = 0; i < size; i++)
         wsect(i, zeroes);
 
     memset(buf, 0, sizeof(buf));
@@ -139,12 +142,12 @@ int add_dir(DIR *cur_dir, int cur_inode, int parent_inode) {
     int r;
     int child_inode;
     int cur_fd, child_fd;
-    struct dirent_423 de;
-    struct dinode din;
+    dirent_423 de;
+    dinode din;
     struct dirent *entry;
     struct stat st;
     int bytes_read;
-    char buf[BLOCK_SIZE];
+    char buf[BSIZE];
     int off;
 
     bzero(&de, sizeof(de));
@@ -215,7 +218,7 @@ int add_dir(DIR *cur_dir, int cur_inode, int parent_inode) {
         } else {
             bytes_read = 0;
             if (st.st_nlink > 0) {
-                printf("^ is hardlink\n");
+                // printf("^ is hardlink\n");
                 uint newINum = freeinode;
                 child_inode = fetchHardLink(st.st_ino, st.st_nlink);
                 if (child_inode != newINum) {
@@ -262,8 +265,8 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    assert((512 % sizeof(struct dinode)) == 0);
-    assert((512 % sizeof(struct dirent_423)) == 0);
+    assert((BSIZE % sizeof(dinode)) == 0);
+    assert((BSIZE % sizeof(dirent_423)) == 0);
 
     fsfd = open(argv[1], O_RDWR | O_CREAT | O_TRUNC, 0666);
     if (fsfd < 0) {
@@ -271,7 +274,7 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    mkfs(995, 200, 1024);
+    mkfs(NINODES, FSSIZE);
 
     root_inode = ialloc(T_DIR);
     assert(root_inode == ROOTINO);
@@ -284,20 +287,22 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    balloc(usedblocks);
+    balloc(freeblock);
     if (hardLinkMapRoot) {
-        printf("warning: nonempty hard link map");
+        // printf("warning: nonempty hard link map");
         freeHardLinkMap();
     }
+
+    printf("final: used %d / %d blocks\n", freeblock, FSSIZE);
     exit(0);
 }
 
 void wsect(uint sec, void *buf) {
-    if (lseek(fsfd, sec * BLOCK_SIZE, 0) != sec * BLOCK_SIZE) {
+    if (lseek(fsfd, sec * BSIZE, 0) != sec * BSIZE) {
         perror("lseek");
         exit(1);
     }
-    if (write(fsfd, buf, BLOCK_SIZE) != BLOCK_SIZE) {
+    if (write(fsfd, buf, BSIZE) != BSIZE) {
         perror("write");
         exit(1);
     }
@@ -305,35 +310,35 @@ void wsect(uint sec, void *buf) {
 
 uint i2b(uint inum) { return (inum / IPB) + 2; }
 
-void winode(uint inum, struct dinode *ip) {
-    char buf[512];
+void winode(uint inum, dinode *ip) {
+    char buf[BSIZE];
     uint bn;
-    struct dinode *dip;
+    dinode *dip;
 
     bn = i2b(inum);
     rsect(bn, buf);
-    dip = ((struct dinode *)buf) + (inum % IPB);
+    dip = ((dinode *)buf) + (inum % IPB);
     *dip = *ip;
     wsect(bn, buf);
 }
 
-void rinode(uint inum, struct dinode *ip) {
-    char buf[512];
+void rinode(uint inum, dinode *ip) {
+    char buf[BSIZE];
     uint bn;
-    struct dinode *dip;
+    dinode *dip;
 
     bn = i2b(inum);
     rsect(bn, buf);
-    dip = ((struct dinode *)buf) + (inum % IPB);
+    dip = ((dinode *)buf) + (inum % IPB);
     *ip = *dip;
 }
 
 void rsect(uint sec, void *buf) {
-    if (lseek(fsfd, sec * BLOCK_SIZE, 0) != sec * BLOCK_SIZE) {
+    if (lseek(fsfd, sec * BSIZE, 0) != sec * BSIZE) {
         perror("lseek");
         exit(1);
     }
-    if (read(fsfd, buf, BLOCK_SIZE) != BLOCK_SIZE) {
+    if (read(fsfd, buf, BSIZE) != BSIZE) {
         perror("read");
         exit(1);
     }
@@ -341,7 +346,7 @@ void rsect(uint sec, void *buf) {
 
 uint ialloc(ushort type) {
     uint inum = freeinode++;
-    struct dinode din;
+    dinode din;
 
     bzero(&din, sizeof(din));
     din.type = xshort(type);
@@ -353,26 +358,27 @@ uint ialloc(ushort type) {
 }
 
 void balloc(int used) {
-    uchar buf[512];
+    uchar buf[BSIZE];
     int i;
 
     printf("balloc: first %d blocks have been allocated\n", used);
-    assert(used < 512 * 8);
-    bzero(buf, 512);
+    assert(used < BSIZE * 8);
+    bzero(buf, BSIZE);
     for (i = 0; i < used; i++) {
         buf[i / 8] = buf[i / 8] | (0x1 << (i % 8));
     }
-    printf("balloc: write bitmap block at sector %zu\n", ninodes / IPB + 3);
-    wsect(ninodes / IPB + 3, buf);
+    printf("balloc: write bitmap block at sector %zu\n",
+           NINODEBLOCKS(NINODES) + 2);
+    wsect(NINODEBLOCKS(NINODES) + 2, buf);
 }
 
 #define min(a, b) ((a) < (b) ? (a) : (b))
 
 void iappend(uint inum, void *xp, int n) {
-    char *p = (char *)xp;
+    char *p = xp;
     uint fbn, off, n1;
-    struct dinode din;
-    char buf[512];
+    dinode din;
+    char buf[BSIZE];
     uint indirect[NINDIRECT];
     uint x;
 
@@ -380,32 +386,29 @@ void iappend(uint inum, void *xp, int n) {
 
     off = xint(din.size);
     while (n > 0) {
-        fbn = off / 512;
+        fbn = off / BSIZE;
         assert(fbn < MAXFILE);
         if (fbn < NDIRECT) {
             if (xint(din.addrs[fbn]) == 0) {
                 din.addrs[fbn] = xint(freeblock++);
-                usedblocks++;
             }
             x = xint(din.addrs[fbn]);
         } else {
             if (xint(din.addrs[NDIRECT]) == 0) {
                 // printf("allocate indirect block\n");
                 din.addrs[NDIRECT] = xint(freeblock++);
-                usedblocks++;
             }
             // printf("read indirect block\n");
-            rsect(xint(din.addrs[NDIRECT]), (char *)indirect);
+            rsect(xint(din.addrs[NDIRECT]), indirect);
             if (indirect[fbn - NDIRECT] == 0) {
                 indirect[fbn - NDIRECT] = xint(freeblock++);
-                usedblocks++;
-                wsect(xint(din.addrs[NDIRECT]), (char *)indirect);
+                wsect(xint(din.addrs[NDIRECT]), indirect);
             }
             x = xint(indirect[fbn - NDIRECT]);
         }
-        n1 = min(n, (fbn + 1) * 512 - off);
+        n1 = min(n, (fbn + 1) * BSIZE - off);
         rsect(x, buf);
-        bcopy(p, buf + off - (fbn * 512), n1);
+        bcopy(p, buf + off - (fbn * BSIZE), n1);
         wsect(x, buf);
         n -= n1;
         off += n1;
