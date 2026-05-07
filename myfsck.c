@@ -1055,6 +1055,50 @@ static void check_parent_directories(void) {
     free(parent_of);
 }
 
+/* Check that every directory reaches root through parent links */
+static void check_directories_reach_root(void) {
+    uint i;
+    uint cur;
+    uint steps;
+    dinode *dip;
+    mp4_dirent *entries;
+
+    for (i = 1; i < ninodes; i++) {
+        dip = get_inode(i);
+
+        if (dip->type != T_DIR) {
+            continue;
+        }
+
+        cur = i;
+        steps = 0;
+
+        while (cur != ROOTINO) {
+            if (steps >= ninodes) {
+                bad_directory_error();
+                exit(1);
+            }
+
+            dip = get_inode(cur);
+
+            if (dip->type != T_DIR || dip->addrs[0] == 0) {
+                bad_directory_error();
+                exit(1);
+            }
+
+            entries = (mp4_dirent *)block_ptr(dip->addrs[0]);
+
+            if (entries[1].inum == 0 || entries[1].inum >= ninodes) {
+                bad_directory_error();
+                exit(1);
+            }
+
+            cur = entries[1].inum;
+            steps++;
+        }
+    }
+}
+
 int main(int argc, char *argv[]) {
     int fd;
     struct stat st;
@@ -1108,7 +1152,7 @@ int main(int argc, char *argv[]) {
     check_file_reference_counts();
     check_directories_once();
     check_parent_directories();
-    
+    check_directories_reach_root();
 
     munmap(img, img_size);
     return 0;
