@@ -1,0 +1,68 @@
+================================================================================
+FAILED TEST CASES
+================================================================================
+
+Test Categories:
+  - Error checking (required): Tests for bad and good images
+  - Extra credit - Error detection: Badparent, Baddir
+  - Extra credit - Repair: Repair, Badroot2
+
+================================================================================
+
+Test 1: Error check: Addronce [Required]
+--------------------------------------------------------------------------------
+Expected: MP4_ERR: direct address used more than once.
+Actual: ['MP4_ERR: bitmap marks block in use but it is not in use.']
+
+Stderr:
+MP4_ERR: bitmap marks block in use but it is not in use.
+
+
+Test 2: Error check: Imrkfree [Required]
+--------------------------------------------------------------------------------
+Expected: MP4_ERR: inode referred to in directory but marked free.
+Actual: ['MP4_ERR: bitmap marks block in use but it is not in use.']
+
+Stderr:
+MP4_ERR: bitmap marks block in use but it is not in use.
+
+
+Test 3: Error check: Indironce [Required]
+--------------------------------------------------------------------------------
+Expected: MP4_ERR: indirect address used more than once.
+Actual: ['MP4_ERR: bitmap marks block in use but it is not in use.']
+
+Stderr:
+MP4_ERR: bitmap marks block in use but it is not in use.
+
+
+Test 4: Error check: Badparent [Extra Credit - Error Detection]
+--------------------------------------------------------------------------------
+Expected: MP4_ERR: parent directory mismatch.
+Actual: ['MP4_ERR: inode referred to in directory but marked free.']
+
+Stderr:
+MP4_ERR: inode referred to in directory but marked free.
+
+
+Test 5: Repair: Repair [Extra Credit - Repair]
+--------------------------------------------------------------------------------
+Expected: Repair success
+Actual: Repair failed
+
+Stderr:
+Usage: myfsck <file_system_image>
+
+
+Test 6: Repair: Badroot2 [Extra Credit - Repair]
+--------------------------------------------------------------------------------
+Expected: Repair success
+Actual: Repair failed
+
+Stderr:
+Usage: myfsck <file_system_image>
+
+
+================================================================================
+Total Failed Tests: 6
+================================================================================
